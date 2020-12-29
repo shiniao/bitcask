@@ -1,9 +1,59 @@
 
-<a name="v0.3.6"></a>
-## [v0.3.6](https://github.com/prologic/bitcask/compare/v0.3.5...v0.3.6) (2020-07-27)
+<a name="v0.3.10"></a>
+## [v0.3.10](https://github.com/prologic/bitcask/compare/v0.3.9...v0.3.10) (2020-12-18)
 
 ### Bug Fixes
 
+* Fix a bug when MaxValueSize == 0 on Merge operations
+* Fix link to bitcask-bench
+* Fix CI (again)
+* Fix CI
+
+### Features
+
+* Add support for unlimited key/value sizes
+* Add a few more test cases for concurrent operations
+
+### Updates
+
+* Update README.md
+
+
+<a name="v0.3.9"></a>
+## [v0.3.9](https://github.com/prologic/bitcask/compare/v0.3.8...v0.3.9) (2020-11-17)
+
+### Bug Fixes
+
+* Fix a race condition around .Close() and .Sync()
+
+### Updates
+
+* Update CHANGELOG for v0.3.9
+
+
+<a name="v0.3.8"></a>
+## [v0.3.8](https://github.com/prologic/bitcask/compare/v0.3.7...v0.3.8) (2020-11-17)
+
+### Updates
+
+* Update CHANGELOG for v0.3.8
+
+
+<a name="v0.3.7"></a>
+## [v0.3.7](https://github.com/prologic/bitcask/compare/v0.3.6...v0.3.7) (2020-11-17)
+
+### Updates
+
+* Update CHANGELOG for v0.3.7
+
+
+<a name="v0.3.6"></a>
+## [v0.3.6](https://github.com/prologic/bitcask/compare/v0.3.5...v0.3.6) (2020-11-17)
+
+### Bug Fixes
+
+* Fix typo in labeler ([#172](https://github.com/prologic/bitcask/issues/172))
+* Fix builds configuration for goreleaser
 * Fix (again) goreleaser config
 * Fix goreleaser config and improve release notes / changelog
 * Fix recoverDatafile error covering ([#162](https://github.com/prologic/bitcask/issues/162))
@@ -11,12 +61,17 @@
 
 ### Features
 
+* Add configuration options for FileMode ([#183](https://github.com/prologic/bitcask/issues/183))
+* Add imports and log in example code ([#182](https://github.com/prologic/bitcask/issues/182))
 * Add empty changelog
 * Add DependaBot config
 * Add DeleteAll function ([#116](https://github.com/prologic/bitcask/issues/116))
 
 ### Updates
 
+* Update CHANGELOG for v0.3.6
+* Update README.md
+* Update CHANGELOG for v0.3.6
 * Update CHANGELOG for v0.3.6
 * Update deps ([#140](https://github.com/prologic/bitcask/issues/140))
 * Update README.md
@@ -109,10 +164,6 @@
 
 * Fix issue(db file Merge issue in windows env): ([#15](https://github.com/prologic/bitcask/issues/15))
 
-### Updates
-
-* Update generated protobuf code
-
 
 <a name="v0.1.7"></a>
 ## [v0.1.7](https://github.com/prologic/bitcask/compare/v0.1.6...v0.1.7) (2019-07-19)
@@ -125,6 +176,7 @@
 
 ### Updates
 
+* Update generated protobuf code
 * Update README.md
 
 
