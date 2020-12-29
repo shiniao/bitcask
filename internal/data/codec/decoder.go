@@ -3,6 +3,7 @@ package codec
 import (
 	"encoding/binary"
 	"io"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/prologic/bitcask/internal"
@@ -49,13 +50,13 @@ func (d *Decoder) Decode(v *internal.Entry) (int64, error) {
 		return 0, err
 	}
 
-	buf := make([]byte, uint64(actualKeySize)+actualValueSize+checksumSize)
+	buf := make([]byte, uint64(actualKeySize)+actualValueSize+checksumSize+ttlSize)
 	if _, err = io.ReadFull(d.r, buf); err != nil {
 		return 0, errTruncatedData
 	}
 
 	decodeWithoutPrefix(buf, actualKeySize, v)
-	return int64(keySize + valueSize + uint64(actualKeySize) + actualValueSize + checksumSize), nil
+	return int64(keySize + valueSize + uint64(actualKeySize) + actualValueSize + checksumSize + ttlSize), nil
 }
 
 // DecodeEntry decodes a serialized entry
@@ -74,7 +75,7 @@ func getKeyValueSizes(buf []byte, maxKeySize uint32, maxValueSize uint64) (uint3
 	actualKeySize := binary.BigEndian.Uint32(buf[:keySize])
 	actualValueSize := binary.BigEndian.Uint64(buf[keySize:])
 
-	if actualKeySize > maxKeySize || actualValueSize > maxValueSize || actualKeySize == 0 {
+	if (maxKeySize > 0 && actualKeySize > maxKeySize) || (maxValueSize > 0 && actualValueSize > maxValueSize) || actualKeySize == 0 {
 
 		return 0, 0, errInvalidKeyOrValueSize
 	}
@@ -84,8 +85,18 @@ func getKeyValueSizes(buf []byte, maxKeySize uint32, maxValueSize uint64) (uint3
 
 func decodeWithoutPrefix(buf []byte, valueOffset uint32, v *internal.Entry) {
 	v.Key = buf[:valueOffset]
-	v.Value = buf[valueOffset : len(buf)-checksumSize]
-	v.Checksum = binary.BigEndian.Uint32(buf[len(buf)-checksumSize:])
+	v.Value = buf[valueOffset : len(buf)-checksumSize-ttlSize]
+	v.Checksum = binary.BigEndian.Uint32(buf[len(buf)-checksumSize-ttlSize : len(buf)-ttlSize])
+	v.Expiry = getKeyExpiry(buf)
+}
+
+func getKeyExpiry(buf []byte) *time.Time {
+	expiry := binary.BigEndian.Uint64(buf[len(buf)-ttlSize:])
+	if expiry == uint64(0) {
+		return nil
+	}
+	t := time.Unix(int64(expiry), 0).UTC()
+	return &t
 }
 
 // IsCorruptedData indicates if the error correspondes to possible data corruption

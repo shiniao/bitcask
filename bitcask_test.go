@@ -9,11 +9,11 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -53,12 +53,6 @@ func SortByteArrays(src [][]byte) [][]byte {
 	return sorted
 }
 
-func skipIfWindows(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Skipping this test on Windows")
-	}
-}
-
 func TestAll(t *testing.T) {
 	var (
 		db      *Bitcask
@@ -77,7 +71,7 @@ func TestAll(t *testing.T) {
 	})
 
 	t.Run("Put", func(t *testing.T) {
-		err = db.Put([]byte([]byte("foo")), []byte("bar"))
+		err = db.Put([]byte("foo"), []byte("bar"))
 		assert.NoError(err)
 	})
 
@@ -89,6 +83,18 @@ func TestAll(t *testing.T) {
 
 	t.Run("Len", func(t *testing.T) {
 		assert.Equal(1, db.Len())
+	})
+
+	t.Run("PutWithExpiry", func(t *testing.T) {
+		err = db.Put([]byte("bar"), []byte("baz"), WithExpiry(time.Now()))
+		assert.NoError(err)
+	})
+
+	t.Run("GetExpiredKey", func(t *testing.T) {
+		time.Sleep(time.Millisecond)
+		_, err := db.Get([]byte("bar"))
+		assert.Error(err)
+		assert.Equal(ErrKeyExpired, err)
 	})
 
 	t.Run("Has", func(t *testing.T) {
@@ -133,6 +139,14 @@ func TestAll(t *testing.T) {
 
 	t.Run("Sync", func(t *testing.T) {
 		err = db.Sync()
+		assert.NoError(err)
+	})
+
+	t.Run("Backup", func(t *testing.T) {
+		path, err := ioutil.TempDir("", "backup")
+		defer os.RemoveAll(path)
+		assert.NoError(err)
+		err = db.Backup(filepath.Join(path, "db-backup"))
 		assert.NoError(err)
 	})
 
@@ -306,6 +320,64 @@ func TestDeletedKeys(t *testing.T) {
 	})
 }
 
+func TestMetadata(t *testing.T) {
+	assert := assert.New(t)
+	testdir, err := ioutil.TempDir("", "bitcask")
+	assert.NoError(err)
+	defer os.RemoveAll(testdir)
+
+	db, err := Open(testdir)
+	assert.NoError(err)
+	err = db.Put([]byte("foo"), []byte("bar"))
+	assert.NoError(err)
+	err = db.Close()
+	assert.NoError(err)
+	db, err = Open(testdir)
+	assert.NoError(err)
+
+	t.Run("IndexUptoDateAfterCloseAndOpen", func(t *testing.T) {
+		assert.Equal(true, db.metadata.IndexUpToDate)
+	})
+	t.Run("IndexUptoDateAfterPut", func(t *testing.T) {
+		assert.NoError(db.Put([]byte("foo1"), []byte("bar1")))
+		assert.Equal(false, db.metadata.IndexUpToDate)
+	})
+	t.Run("Reclaimable", func(t *testing.T) {
+		assert.Equal(int64(0), db.Reclaimable())
+	})
+	t.Run("ReclaimableAfterNewPut", func(t *testing.T) {
+		assert.NoError(db.Put([]byte("hello"), []byte("world")))
+		assert.Equal(int64(0), db.Reclaimable())
+	})
+	t.Run("ReclaimableAfterRepeatedPut", func(t *testing.T) {
+		assert.NoError(db.Put([]byte("hello"), []byte("world")))
+		assert.Equal(int64(34), db.Reclaimable())
+	})
+	t.Run("ReclaimableAfterDelete", func(t *testing.T) {
+		assert.NoError(db.Delete([]byte("hello")))
+		assert.Equal(int64(97), db.Reclaimable())
+	})
+	t.Run("ReclaimableAfterNonExistingDelete", func(t *testing.T) {
+		assert.NoError(db.Delete([]byte("hello1")))
+		assert.Equal(int64(97), db.Reclaimable())
+	})
+	t.Run("ReclaimableAfterDeleteAll", func(t *testing.T) {
+		assert.NoError(db.DeleteAll())
+		assert.Equal(int64(214), db.Reclaimable())
+	})
+	t.Run("ReclaimableAfterMerge", func(t *testing.T) {
+		assert.NoError(db.Merge())
+		assert.Equal(int64(0), db.Reclaimable())
+	})
+	t.Run("IndexUptoDateAfterMerge", func(t *testing.T) {
+		assert.Equal(true, db.metadata.IndexUpToDate)
+	})
+	t.Run("ReclaimableAfterMergeAndDeleteAll", func(t *testing.T) {
+		assert.NoError(db.DeleteAll())
+		assert.Equal(int64(0), db.Reclaimable())
+	})
+}
+
 func TestConfigErrors(t *testing.T) {
 	assert := assert.New(t)
 
@@ -337,9 +409,6 @@ func TestConfigErrors(t *testing.T) {
 }
 
 func TestAutoRecovery(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.SkipNow()
-	}
 	withAutoRecovery := []bool{false, true}
 
 	for _, autoRecovery := range withAutoRecovery {
@@ -577,6 +646,11 @@ func TestSync(t *testing.T) {
 		value := []byte("foobar")
 		err = db.Put(key, value)
 	})
+
+	t.Run("Put", func(t *testing.T) {
+		err = db.Put([]byte("hello"), []byte("world"))
+		assert.NoError(err)
+	})
 }
 
 func TestMaxKeySize(t *testing.T) {
@@ -707,8 +781,6 @@ func TestStatsError(t *testing.T) {
 	})
 
 	t.Run("Test", func(t *testing.T) {
-		skipIfWindows(t)
-
 		t.Run("FabricatedDestruction", func(t *testing.T) {
 			// This would never happen in reality :D
 			// Or would it? :)
@@ -719,6 +791,162 @@ func TestStatsError(t *testing.T) {
 		t.Run("Stats", func(t *testing.T) {
 			_, err := db.Stats()
 			assert.Error(err)
+		})
+	})
+}
+
+func TestDirFileModeBeforeUmask(t *testing.T) {
+	assert := assert.New(t)
+
+	t.Run("Setup", func(t *testing.T) {
+		t.Run("Default DirFileModeBeforeUmask is 0700", func(t *testing.T) {
+			testdir, err := ioutil.TempDir("", "bitcask")
+			embeddedDir := filepath.Join(testdir, "cache")
+			assert.NoError(err)
+			defer os.RemoveAll(testdir)
+
+			defaultTestMode := os.FileMode(0700)
+
+			db, err := Open(embeddedDir)
+			assert.NoError(err)
+			defer db.Close()
+			err = filepath.Walk(testdir, func(path string, info os.FileInfo, err error) error {
+				// skip the root directory
+				if path == testdir {
+					return nil
+				}
+				if info.IsDir() {
+					// perms for directory on disk are filtered through defaultTestMode, AND umask of user running test.
+					// this means the mkdir calls can only FURTHER restrict permissions, not grant more (preventing escalatation).
+					// to make this test OS agnostic, we'll skip using golang.org/x/sys/unix, inferring umask via XOR and AND NOT.
+
+					// create anotherDir with allPerms - to infer umask
+					anotherDir := filepath.Join(testdir, "temp")
+					err := os.Mkdir(anotherDir, os.ModePerm)
+					assert.NoError(err)
+					defer os.RemoveAll(anotherDir)
+
+					anotherStat, err := os.Stat(anotherDir)
+					assert.NoError(err)
+
+					// infer umask from anotherDir
+					umask := os.ModePerm ^ (anotherStat.Mode() & os.ModePerm)
+
+					assert.Equal(info.Mode()&os.ModePerm, defaultTestMode&^umask)
+				}
+				return nil
+			})
+			assert.NoError(err)
+		})
+
+		t.Run("Dir FileModeBeforeUmask is set via options for all subdirectories", func(t *testing.T) {
+			testdir, err := ioutil.TempDir("", "bitcask")
+			embeddedDir := filepath.Join(testdir, "cache")
+			assert.NoError(err)
+			defer os.RemoveAll(testdir)
+
+			testMode := os.FileMode(0713)
+
+			db, err := Open(embeddedDir, WithDirFileModeBeforeUmask(testMode))
+			assert.NoError(err)
+			defer db.Close()
+			err = filepath.Walk(testdir, func(path string, info os.FileInfo, err error) error {
+				// skip the root directory
+				if path == testdir {
+					return nil
+				}
+				if info.IsDir() {
+					// create anotherDir with allPerms - to infer umask
+					anotherDir := filepath.Join(testdir, "temp")
+					err := os.Mkdir(anotherDir, os.ModePerm)
+					assert.NoError(err)
+					defer os.RemoveAll(anotherDir)
+
+					anotherStat, _ := os.Stat(anotherDir)
+
+					// infer umask from anotherDir
+					umask := os.ModePerm ^ (anotherStat.Mode() & os.ModePerm)
+
+					assert.Equal(info.Mode()&os.ModePerm, testMode&^umask)
+				}
+				return nil
+			})
+			assert.NoError(err)
+		})
+
+	})
+}
+
+func TestFileFileModeBeforeUmask(t *testing.T) {
+	assert := assert.New(t)
+
+	t.Run("Setup", func(t *testing.T) {
+		t.Run("Default File FileModeBeforeUmask is 0600", func(t *testing.T) {
+			testdir, err := ioutil.TempDir("", "bitcask")
+			assert.NoError(err)
+			defer os.RemoveAll(testdir)
+
+			defaultTestMode := os.FileMode(0600)
+
+			db, err := Open(testdir)
+			assert.NoError(err)
+			defer db.Close()
+			err = filepath.Walk(testdir, func(path string, info os.FileInfo, err error) error {
+				if !info.IsDir() {
+					// the lock file is set within Flock, so ignore it
+					if filepath.Base(path) == "lock" {
+						return nil
+					}
+					// create aFile with allPerms - to infer umask
+					aFilePath := filepath.Join(testdir, "temp")
+					_, err := os.OpenFile(aFilePath, os.O_CREATE, os.ModePerm)
+					assert.NoError(err)
+					defer os.RemoveAll(aFilePath)
+
+					fileStat, _ := os.Stat(aFilePath)
+
+					// infer umask from anotherDir
+					umask := os.ModePerm ^ (fileStat.Mode() & os.ModePerm)
+
+					assert.Equal(info.Mode()&os.ModePerm, defaultTestMode&^umask)
+				}
+				return nil
+			})
+			assert.NoError(err)
+		})
+
+		t.Run("File FileModeBeforeUmask is set via options for all files", func(t *testing.T) {
+			testdir, err := ioutil.TempDir("", "bitcask")
+			assert.NoError(err)
+			defer os.RemoveAll(testdir)
+
+			testMode := os.FileMode(0673)
+
+			db, err := Open(testdir, WithFileFileModeBeforeUmask(testMode))
+			assert.NoError(err)
+			defer db.Close()
+			err = filepath.Walk(testdir, func(path string, info os.FileInfo, err error) error {
+				if !info.IsDir() {
+					// the lock file is set within Flock, so ignore it
+					if filepath.Base(path) == "lock" {
+						return nil
+					}
+					// create aFile with allPerms - to infer umask
+					aFilePath := filepath.Join(testdir, "temp")
+					_, err := os.OpenFile(aFilePath, os.O_CREATE, os.ModePerm)
+					assert.NoError(err)
+					defer os.RemoveAll(aFilePath)
+
+					fileStat, _ := os.Stat(aFilePath)
+
+					// infer umask from anotherDir
+					umask := os.ModePerm ^ (fileStat.Mode() & os.ModePerm)
+
+					assert.Equal(info.Mode()&os.ModePerm, testMode&^umask)
+				}
+				return nil
+			})
+			assert.NoError(err)
 		})
 	})
 }
@@ -824,7 +1052,7 @@ func TestMerge(t *testing.T) {
 
 		s3, err := db.Stats()
 		assert.NoError(err)
-		assert.Equal(1, s3.Datafiles)
+		assert.Equal(2, s3.Datafiles)
 		assert.Equal(1, s3.Keys)
 		assert.True(s3.Size > s1.Size)
 		assert.True(s3.Size < s2.Size)
@@ -857,7 +1085,7 @@ func TestGetErrors(t *testing.T) {
 
 		mockDatafile := new(mocks.Datafile)
 		mockDatafile.On("FileID").Return(0)
-		mockDatafile.On("ReadAt", int64(0), int64(22)).Return(
+		mockDatafile.On("ReadAt", int64(0), int64(30)).Return(
 			internal.Entry{},
 			ErrMockError,
 		)
@@ -873,7 +1101,7 @@ func TestGetErrors(t *testing.T) {
 		assert.NoError(err)
 		defer os.RemoveAll(testdir)
 
-		db, err := Open(testdir, WithMaxDatafileSize(32))
+		db, err := Open(testdir, WithMaxDatafileSize(40))
 		assert.NoError(err)
 
 		err = db.Put([]byte("foo"), []byte("bar"))
@@ -881,7 +1109,7 @@ func TestGetErrors(t *testing.T) {
 
 		mockDatafile := new(mocks.Datafile)
 		mockDatafile.On("FileID").Return(0)
-		mockDatafile.On("ReadAt", int64(0), int64(22)).Return(
+		mockDatafile.On("ReadAt", int64(0), int64(30)).Return(
 			internal.Entry{
 				Checksum: 0x0,
 				Key:      []byte("foo"),
@@ -1048,7 +1276,7 @@ func TestCloseErrors(t *testing.T) {
 		assert.NoError(err)
 
 		mockIndexer := new(mocks.Indexer)
-		mockIndexer.On("Save", db.trie, filepath.Join(db.path, "index")).Return(ErrMockError)
+		mockIndexer.On("Save", db.trie, filepath.Join(db.path, "temp_index")).Return(ErrMockError)
 		db.indexer = mockIndexer
 
 		err = db.Close()
@@ -1119,8 +1347,6 @@ func TestMergeErrors(t *testing.T) {
 	assert := assert.New(t)
 
 	t.Run("RemoveDatabaseDirectory", func(t *testing.T) {
-		skipIfWindows(t)
-
 		testdir, err := ioutil.TempDir("", "bitcask")
 		assert.NoError(err)
 		defer os.RemoveAll(testdir)
@@ -1156,18 +1382,19 @@ func TestMergeErrors(t *testing.T) {
 		assert.NoError(err)
 		defer os.RemoveAll(testdir)
 
-		db, err := Open(testdir)
+		db, err := Open(testdir, WithMaxDatafileSize(22))
 		assert.NoError(err)
 
 		assert.NoError(db.Put([]byte("foo"), []byte("bar")))
+		assert.NoError(db.Put([]byte("bar"), []byte("baz")))
 
 		mockDatafile := new(mocks.Datafile)
-		mockDatafile.On("FileID").Return(0)
-		mockDatafile.On("ReadAt", int64(0), int64(22)).Return(
+		mockDatafile.On("Close").Return(nil)
+		mockDatafile.On("ReadAt", int64(0), int64(30)).Return(
 			internal.Entry{},
 			ErrMockError,
 		)
-		db.curr = mockDatafile
+		db.datafiles[0] = mockDatafile
 
 		err = db.Merge()
 		assert.Error(err)
@@ -1245,6 +1472,92 @@ func TestConcurrent(t *testing.T) {
 
 			wg.Wait()
 		})
+
+		// Test concurrent Put() with concurrent Scan()
+		t.Run("PutScan", func(t *testing.T) {
+			doPut := func(wg *sync.WaitGroup, x int) {
+				defer func() {
+					wg.Done()
+				}()
+				for i := 0; i <= 100; i++ {
+					if i%x == 0 {
+						key := []byte(fmt.Sprintf("k%d", i))
+						value := []byte(fmt.Sprintf("v%d", i))
+						err := db.Put(key, value)
+						assert.NoError(err)
+					}
+				}
+			}
+
+			doScan := func(wg *sync.WaitGroup, x int) {
+				defer func() {
+					wg.Done()
+				}()
+				for i := 0; i <= 100; i++ {
+					if i%x == 0 {
+						err := db.Scan([]byte("k"), func(key []byte) error {
+							return nil
+						})
+						assert.NoError(err)
+					}
+				}
+			}
+
+			wg := &sync.WaitGroup{}
+			wg.Add(6)
+
+			go doPut(wg, 2)
+			go doPut(wg, 3)
+			go doPut(wg, 5)
+			go doScan(wg, 1)
+			go doScan(wg, 2)
+			go doScan(wg, 4)
+
+			wg.Wait()
+		})
+
+		// XXX: This has data races
+		/* Test concurrent Scan() with concurrent Merge()
+		t.Run("ScanMerge", func(t *testing.T) {
+			doScan := func(wg *sync.WaitGroup, x int) {
+				defer func() {
+					wg.Done()
+				}()
+				for i := 0; i <= 100; i++ {
+					if i%x == 0 {
+						err := db.Scan([]byte("k"), func(key []byte) error {
+							return nil
+						})
+						assert.NoError(err)
+					}
+				}
+			}
+
+			doMerge := func(wg *sync.WaitGroup, x int) {
+				defer func() {
+					wg.Done()
+				}()
+				for i := 0; i <= 100; i++ {
+					if i%x == 0 {
+						err := db.Merge()
+						assert.NoError(err)
+					}
+				}
+			}
+
+			wg := &sync.WaitGroup{}
+			wg.Add(6)
+
+			go doScan(wg, 2)
+			go doScan(wg, 3)
+			go doScan(wg, 5)
+			go doMerge(wg, 1)
+			go doMerge(wg, 2)
+			go doMerge(wg, 4)
+
+			wg.Wait()
+		})
+		*/
 
 		t.Run("Close", func(t *testing.T) {
 			err = db.Close()
@@ -1325,7 +1638,27 @@ func TestLocking(t *testing.T) {
 
 	_, err = Open(testdir)
 	assert.Error(err)
-	assert.Equal(ErrDatabaseLocked, err)
+}
+
+func TestLockingAfterMerge(t *testing.T) {
+	assert := assert.New(t)
+
+	testdir, err := ioutil.TempDir("", "bitcask")
+	assert.NoError(err)
+
+	db, err := Open(testdir)
+	assert.NoError(err)
+	defer db.Close()
+
+	_, err = Open(testdir)
+	assert.Error(err)
+
+	err = db.Merge()
+	assert.NoError(err)
+
+	// This should still error.
+	_, err = Open(testdir)
+	assert.Error(err)
 }
 
 type benchmarkTestCase struct {
