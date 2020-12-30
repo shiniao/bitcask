@@ -13,6 +13,7 @@ import (
 )
 
 const (
+	// 默认数据文件名
 	defaultDatafileFilename = "%09d.data"
 )
 
@@ -21,7 +22,7 @@ var (
 	errReadError = errors.New("error: read error")
 )
 
-// Datafile is an interface  that represents a readable and writeable datafile
+// Datafile is an interface that represents a readable and writeable datafile
 type Datafile interface {
 	FileID() int
 	Name() string
@@ -34,17 +35,17 @@ type Datafile interface {
 }
 
 type datafile struct {
-	sync.RWMutex
+	sync.RWMutex // 读写锁
 
-	id           int
-	r            *os.File
-	ra           *mmap.ReaderAt
-	w            *os.File
-	offset       int64
-	dec          *codec.Decoder
-	enc          *codec.Encoder
-	maxKeySize   uint32
-	maxValueSize uint64
+	id           int            // 标识
+	r            *os.File       // read文件描述符
+	ra           *mmap.ReaderAt // 读取内存映射文件
+	w            *os.File       // write文件描述符
+	offset       int64          // 偏移量
+	dec          *codec.Decoder // decode
+	enc          *codec.Encoder // encode
+	maxKeySize   uint32         // 最大 key 大小
+	maxValueSize uint64         // 最大 value 大小
 }
 
 // NewDatafile opens an existing datafile
@@ -58,13 +59,14 @@ func NewDatafile(path string, id int, readonly bool, maxKeySize uint32, maxValue
 
 	fn := filepath.Join(path, fmt.Sprintf(defaultDatafileFilename, id))
 
+	// 文件可写，打开写 fd
 	if !readonly {
 		w, err = os.OpenFile(fn, os.O_WRONLY|os.O_APPEND|os.O_CREATE, fileMode)
 		if err != nil {
 			return nil, err
 		}
 	}
-
+	// 读文件 fd
 	r, err = os.Open(fn)
 	if err != nil {
 		return nil, err
@@ -73,15 +75,16 @@ func NewDatafile(path string, id int, readonly bool, maxKeySize uint32, maxValue
 	if err != nil {
 		return nil, errors.Wrap(err, "error calling Stat()")
 	}
-
+	// mmap 打开文件（打开内存映射的文件）
 	ra, err = mmap.Open(fn)
 	if err != nil {
 		return nil, err
 	}
-
+	// 偏移量为文件大小
 	offset := stat.Size()
-
+	// 读的文件，解码
 	dec := codec.NewDecoder(r, maxKeySize, maxValueSize)
+	// 写的文件，编码
 	enc := codec.NewEncoder(w)
 
 	return &datafile{
@@ -115,7 +118,7 @@ func (df *datafile) Close() error {
 	if df.w == nil {
 		return nil
 	}
-
+	// 关闭之前先刷入磁盘
 	err := df.Sync()
 	if err != nil {
 		return err
@@ -123,6 +126,7 @@ func (df *datafile) Close() error {
 	return df.w.Close()
 }
 
+// 刷入 write fd 到磁盘
 func (df *datafile) Sync() error {
 	if df.w == nil {
 		return nil
@@ -137,10 +141,11 @@ func (df *datafile) Size() int64 {
 }
 
 // Read reads the next entry from the datafile
+// 读数据文件
 func (df *datafile) Read() (e internal.Entry, n int64, err error) {
 	df.Lock()
 	defer df.Unlock()
-
+	// 从 datafile 读取 entry，解码
 	n, err = df.dec.Decode(&e)
 	if err != nil {
 		return
@@ -150,11 +155,12 @@ func (df *datafile) Read() (e internal.Entry, n int64, err error) {
 }
 
 // ReadAt the entry located at index offset with expected serialized size
+// 读固定大小 entry
 func (df *datafile) ReadAt(index, size int64) (e internal.Entry, err error) {
 	var n int
 
 	b := make([]byte, size)
-
+	// 如果文件只读
 	if df.w == nil {
 		n, err = df.ra.ReadAt(b, index)
 	} else {
@@ -173,6 +179,7 @@ func (df *datafile) ReadAt(index, size int64) (e internal.Entry, err error) {
 	return
 }
 
+// 写入 entry 到 datafile
 func (df *datafile) Write(e internal.Entry) (int64, int64, error) {
 	if df.w == nil {
 		return -1, 0, errReadonly
@@ -182,11 +189,12 @@ func (df *datafile) Write(e internal.Entry) (int64, int64, error) {
 	defer df.Unlock()
 
 	e.Offset = df.offset
-
+	// 编码
 	n, err := df.enc.Encode(e)
 	if err != nil {
 		return -1, 0, err
 	}
+	// 偏移量 +
 	df.offset += n
 
 	return e.Offset, n, nil

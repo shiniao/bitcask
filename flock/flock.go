@@ -5,7 +5,7 @@ import (
 	"os"
 	"sync"
 )
-
+// 文件锁
 type Flock struct {
 	path string
 	m    sync.Mutex
@@ -32,6 +32,7 @@ func (f *Flock) Path() string {
 }
 
 // Lock will acquire the lock. This function may block indefinitely if some other process holds the lock. For a non-blocking version, see Flock.TryLock().
+// 加锁
 func (f *Flock) Lock() error {
 	f.m.Lock()
 	defer f.m.Unlock()
@@ -41,7 +42,7 @@ func (f *Flock) Lock() error {
 	}
 
 	var fh *os.File
-
+	// 加锁
 	fh, err := lock_sys(f.path, false)
 	// treat "ErrInodeChangedAtPath" as "some other process holds the lock, retry locking"
 	for err == ErrInodeChangedAtPath {
@@ -60,6 +61,8 @@ func (f *Flock) Lock() error {
 }
 
 // TryLock will try to acquire the lock, and returns immediately if the lock is already owned by another process.
+// 尝试加锁，如果文件已经被锁住，返回
+// 这是因为 unix.LOCK_NB
 func (f *Flock) TryLock() (bool, error) {
 	f.m.Lock()
 	defer f.m.Unlock()

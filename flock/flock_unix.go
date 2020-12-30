@@ -8,25 +8,27 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// lock_sys 给文件加锁
 func lock_sys(path string, nonBlocking bool) (_ *os.File, err error) {
 	var fh *os.File
-
+	// open a file with read and write
 	fh, err = os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0666)
 	if err != nil {
 		return nil, err
 	}
-
+	// defer close file head
 	defer func() {
 		if err != nil {
 			fh.Close()
 		}
 	}()
-
+	// 加上排它锁
 	flag := unix.LOCK_EX
+	// 如果是非阻塞版本，尝试对一个已经加锁的文件上锁会报错，而不是阻塞
 	if nonBlocking {
 		flag |= unix.LOCK_NB
 	}
-
+	// 给文件加锁
 	err = unix.Flock(int(fh.Fd()), flag)
 	if err != nil {
 		return nil, err

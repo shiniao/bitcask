@@ -67,22 +67,23 @@ var (
 // and in-memory hash of key/value pairs as per the Bitcask paper and seen
 // in the Riak database.
 type Bitcask struct {
-	mu sync.RWMutex
+	mu sync.RWMutex // 读写互斥锁
 
-	*flock.Flock
+	*flock.Flock // 文件锁
 
-	config    *config.Config
-	options   []Option
-	path      string
-	curr      data.Datafile
-	datafiles map[int]data.Datafile
-	trie      art.Tree
-	indexer   index.Indexer
-	metadata  *metadata.MetaData
-	isMerging bool
+	config    *config.Config        // 数据库配置
+	options   []Option              // 数据库选项
+	path      string                // 存储路径
+	curr      data.Datafile         // 当前 datafile
+	datafiles map[int]data.Datafile // 所有的 datafile
+	trie      art.Tree              // trie 树
+	indexer   index.Indexer         // 索引
+	metadata  *metadata.MetaData    // 源数据
+	isMerging bool                  // 是否正在合并
 }
 
 // Stats is a struct returned by Stats() on an open Bitcask instance
+// 数据库状态
 type Stats struct {
 	Datafiles int
 	Keys      int
@@ -117,49 +118,59 @@ func (b *Bitcask) Close() error {
 	return b.close()
 }
 
+// 关闭
 func (b *Bitcask) close() error {
+	// 保存 index
 	if err := b.saveIndex(); err != nil {
 		return err
 	}
 
 	b.metadata.IndexUpToDate = true
+
+	// 保存源数据
 	if err := b.saveMetadata(); err != nil {
 		return err
 	}
 
+	// 关闭所有 datafile
 	for _, df := range b.datafiles {
 		if err := df.Close(); err != nil {
 			return err
 		}
 	}
-
+	// 关闭当前 datafile
 	return b.curr.Close()
 }
 
 // Sync flushes all buffers to disk ensuring all data is written
+// 同步数据到磁盘
 func (b *Bitcask) Sync() error {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-
+	// 保存源数据
 	if err := b.saveMetadata(); err != nil {
 		return err
 	}
-
+	// 同步当前 datafile
 	return b.curr.Sync()
 }
 
 // Get fetches value for a key
+// get value by key
 func (b *Bitcask) Get(key []byte) ([]byte, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	// 获取 entry
 	e, err := b.get(key)
 	if err != nil {
 		return nil, err
 	}
+	// 返回 value
 	return e.Value, nil
 }
 
 // Has returns true if the key exists in the database, false otherwise.
+// 查找是否有该 key
 func (b *Bitcask) Has(key []byte) bool {
 	b.mu.RLock()
 	_, found := b.trie.Search(key)
@@ -172,6 +183,7 @@ func (b *Bitcask) Put(key, value []byte, options ...PutOptions) error {
 	if len(key) == 0 {
 		return ErrEmptyKey
 	}
+	// key 和 value 超出大小，error
 	if b.config.MaxKeySize > 0 && uint32(len(key)) > b.config.MaxKeySize {
 		return ErrKeyTooLarge
 	}
@@ -187,11 +199,12 @@ func (b *Bitcask) Put(key, value []byte, options ...PutOptions) error {
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// 写入 kv
 	offset, n, err := b.put(key, value, feature)
 	if err != nil {
 		return err
 	}
-
+	// 如果配置了同步，同步到磁盘
 	if b.config.Sync {
 		if err := b.curr.Sync(); err != nil {
 			return err
@@ -200,12 +213,13 @@ func (b *Bitcask) Put(key, value []byte, options ...PutOptions) error {
 
 	// in case of successful `put`, IndexUpToDate will be always be false
 	b.metadata.IndexUpToDate = false
-
+	// 如果trie 树中已经存在该 key，标记为回收
 	if oldItem, found := b.trie.Search(key); found {
 		b.metadata.ReclaimableSpace += oldItem.(internal.Item).Size
 	}
-
+	// 建立当前 kv item
 	item := internal.Item{FileID: b.curr.FileID(), Offset: offset, Size: n}
+	// 在 trie 树（index）中插入（或更新）
 	b.trie.Insert(key, item)
 
 	return nil
@@ -221,13 +235,16 @@ func (b *Bitcask) Delete(key []byte) error {
 // delete deletes the named key. If the key doesn't exist or an I/O error
 // occurs the error is returned.
 func (b *Bitcask) delete(key []byte) error {
+	// 在数据库中将该 key 的 value 写为空
 	_, _, err := b.put(key, []byte{}, Feature{})
 	if err != nil {
 		return err
 	}
+	// 在 trie 中找到该 key，待回收
 	if item, found := b.trie.Search(key); found {
 		b.metadata.ReclaimableSpace += item.(internal.Item).Size + codec.MetaInfoSize + int64(len(key))
 	}
+	// 在 trie 树中删除
 	b.trie.Delete(key)
 
 	return nil
@@ -313,70 +330,79 @@ func (b *Bitcask) Fold(f func(key []byte) error) (err error) {
 
 // get retrieves the value of the given key. If the key is not found or an/I/O
 // error occurs a null byte slice is returned along with the error.
+// get value by key
 func (b *Bitcask) get(key []byte) (internal.Entry, error) {
 	var df data.Datafile
-
+	// 先从 trie 中查找 key 对应 entry 所在的文件位置
 	value, found := b.trie.Search(key)
 	if !found {
 		return internal.Entry{}, ErrKeyNotFound
 	}
-
+	// item，item 是要查找键值对在磁盘中文件位置，偏移量和大小
 	item := value.(internal.Item)
-
+	// 如果是当前 datafile
 	if item.FileID == b.curr.FileID() {
 		df = b.curr
 	} else {
+		// 不是的话，通过 datafile 数组定位
 		df = b.datafiles[item.FileID]
 	}
-
+	// 根据 offset 和 entry 的大小，从磁盘中读取 entry，并解码
 	e, err := df.ReadAt(item.Offset, item.Size)
 	if err != nil {
 		return internal.Entry{}, err
 	}
-
+	// 如果数据已经过期了，删除该键值对
 	if e.Expiry != nil && e.Expiry.Before(time.Now().UTC()) {
 		_ = b.delete(key) // we don't care if it doesnt succeed
 		return internal.Entry{}, ErrKeyExpired
 	}
-
+	// 校验和
 	checksum := crc32.ChecksumIEEE(e.Value)
 	if checksum != e.Checksum {
 		return internal.Entry{}, ErrChecksumFailed
 	}
-
+	// 返回数据
 	return e, nil
 }
 
 // put inserts a new (key, value). Both key and value are valid inputs.
+// 存
 func (b *Bitcask) put(key, value []byte, feature Feature) (int64, int64, error) {
 	size := b.curr.Size()
+	// 如果当前 datafile 超出
 	if size >= int64(b.config.MaxDatafileSize) {
+		// 关闭当前 datafile
 		err := b.curr.Close()
 		if err != nil {
 			return -1, 0, err
 		}
 
 		id := b.curr.FileID()
-
+		// 将当前 datafile 归档（只读）
 		df, err := data.NewDatafile(b.path, id, true, b.config.MaxKeySize, b.config.MaxValueSize, b.config.FileFileModeBeforeUmask)
 		if err != nil {
 			return -1, 0, err
 		}
-
+		// 归入 datafiles 集合
 		b.datafiles[id] = df
 
+		// id+1 后新建一个 datafile
 		id = b.curr.FileID() + 1
 		curr, err := data.NewDatafile(b.path, id, false, b.config.MaxKeySize, b.config.MaxValueSize, b.config.FileFileModeBeforeUmask)
 		if err != nil {
 			return -1, 0, err
 		}
+		// 将新建的 datafile 设为 curr
 		b.curr = curr
+		// 保存 index（当前 datafile 满了后，保存 index）
 		err = b.saveIndex()
 		if err != nil {
 			return -1, 0, err
 		}
 	}
-
+	// 当前 datafile 够用
+	// 构建 entry，写入
 	e := internal.NewEntry(key, value, feature.Expiry)
 	return b.curr.Write(e)
 }
@@ -442,36 +468,48 @@ func (b *Bitcask) reopen() error {
 // Merge merges all datafiles in the database. Old keys are squashed
 // and deleted keys removes. Duplicate key/value pairs are also removed.
 // Call this function periodically to reclaim disk space.
+// 合并 datafile，压缩旧key，删除不用的 key 和重复的 kv
 func (b *Bitcask) Merge() error {
 	b.mu.Lock()
+	// 如果正在合并，unlock
 	if b.isMerging {
 		b.mu.Unlock()
 		return ErrMergeInProgress
 	}
+
 	b.isMerging = true
 	b.mu.Unlock()
 	defer func() {
 		b.isMerging = false
 	}()
+
+	// 添加读锁
 	b.mu.RLock()
+	// 关闭当前 datafile，并设置为只读
 	err := b.closeCurrentFile()
 	if err != nil {
 		b.mu.RUnlock()
 		return err
 	}
+
+	// 要合并的 datafile
 	filesToMerge := make([]int, 0, len(b.datafiles))
 	for k := range b.datafiles {
 		filesToMerge = append(filesToMerge, k)
 	}
+	// 新打开一个可写 datafile
 	err = b.openNewWritableFile()
 	if err != nil {
 		b.mu.RUnlock()
 		return err
 	}
 	b.mu.RUnlock()
+
+	// 对 datafile 排序，根据 fileID
 	sort.Ints(filesToMerge)
 
 	// Temporary merged database path
+	// 创建一个临时合并文件夹
 	temp, err := ioutil.TempDir(b.path, "merge")
 	if err != nil {
 		return err
@@ -479,6 +517,7 @@ func (b *Bitcask) Merge() error {
 	defer os.RemoveAll(temp)
 
 	// Create a merged database
+	// 创建一个临时数据库
 	mdb, err := Open(temp, withConfig(b.config))
 	if err != nil {
 		return err
@@ -668,6 +707,7 @@ func (b *Bitcask) Backup(path string) error {
 }
 
 // saveIndex saves index currently in RAM to disk
+// 保存 index 到磁盘
 func (b *Bitcask) saveIndex() error {
 	tempIdx := "temp_index"
 	if err := b.indexer.Save(b.trie, filepath.Join(b.path, tempIdx)); err != nil {
